@@ -3,7 +3,7 @@
 # ==============================================================================
 # Script de Despliegue de Agentes de Seguridad para SISBolivia.com
 #
-# Versión: 1.0
+# Versión: 1.1
 # Autor: Hans Gallardo (con la ayuda de Gemini)
 #
 # Este script automatiza la instalación y configuración de:
@@ -11,7 +11,7 @@
 #   2. El Agente de Wazuh (Plataforma de Detección y Respuesta)
 #   3. La integración entre ambos.
 #
-# Es compatible con sistemas basados en Debian (Ubuntu) y RHEL (AlmaLinux).
+# Es compatible con sistemas basados en Debian (Ubuntu) y RHEL (AlmaLinux, CloudLinux).
 # ==============================================================================
 
 # --- Configuración ---
@@ -91,9 +91,9 @@ if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
     apt-get update -y
     WAZUH_MANAGER=$WAZUH_MANAGER_ADDRESS apt-get install wazuh-agent -y
     
-elif [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ]; then
-    # --- Lógica para AlmaLinux/RHEL/CentOS ---
-    log_info "Ejecutando la instalación para AlmaLinux/RHEL..."
+elif [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "cloudlinux" ]; then
+    # --- Lógica para AlmaLinux/RHEL/CentOS/CloudLinux ---
+    log_info "Ejecutando la instalación para un sistema basado en RHEL (AlmaLinux/CloudLinux)..."
     
     # Actualizar el sistema
     dnf update -y
@@ -131,7 +131,7 @@ EOF
     WAZUH_MANAGER=$WAZUH_MANAGER_ADDRESS dnf install wazuh-agent -y
 
 else
-    log_error "Sistema operativo no soportado: $OS_ID. Este script solo soporta Ubuntu/Debian y AlmaLinux/RHEL."
+    log_error "Sistema operativo no soportado: $OS_ID. Este script solo soporta Ubuntu/Debian y sistemas basados en RHEL."
 fi
 
 # 4. Integración de Suricata con el Agente de Wazuh (Común para ambos sistemas)
@@ -157,3 +157,4 @@ systemctl start wazuh-agent
 
 log_info "--- ¡Despliegue completado con éxito! ---"
 log_info "El agente debería aparecer en tu dashboard de Wazuh en unos minutos."
+
