@@ -1,160 +1,144 @@
 #!/bin/bash
-
 # ==============================================================================
-# Script de Despliegue de Agentes de Seguridad para SISBolivia.com
+# SISBolivia - Instalador Inteligente de Agentes de Seguridad
 #
-# Versión: 1.1
-# Autor: Hans Gallardo (con la ayuda de Gemini)
-#
-# Este script automatiza la instalación y configuración de:
-#   1. Suricata (Sistema de Detección de Intrusiones en Red)
-#   2. El Agente de Wazuh (Plataforma de Detección y Respuesta)
-#   3. La integración entre ambos.
-#
-# Es compatible con sistemas basados en Debian (Ubuntu) y RHEL (AlmaLinux, CloudLinux).
+# Versión: 2.0
+# Autor: Hans Gallardo (mejorado con ChatGPT)
+# Descripción:
+#   Detecta automáticamente el entorno y ajusta la instalación:
+#   - Si el servidor tiene >500 GB de espacio → instala Wazuh + Suricata completo
+#   - Si tiene <=500 GB → instala solo el agente Wazuh en modo liviano
+#   Configura automáticamente la integración, rotación y optimización.
 # ==============================================================================
 
-# --- Configuración ---
-# Dirección de tu Wazuh Manager. ¡Asegúrate de que este valor sea correcto!
-WAZUH_MANAGER_ADDRESS="wazuh.sisbolivia.com"
+WAZUH_MANAGER="wazuh.sisbolivia.com"
 
-# --- Funciones de Utilidad ---
-# Función para imprimir mensajes informativos
-log_info() {
-    echo "INFO: $1"
-}
+# --- Funciones auxiliares ---
+log() { echo -e "\033[1;32m[INFO]\033[0m $1"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
+error() { echo -e "\033[1;31m[ERROR]\033[0m $1" >&2; exit 1; }
 
-# Función para imprimir mensajes de error y salir
-log_error() {
-    echo "ERROR: $1"
-    exit 1
-}
+# --- Verificar ejecución como root ---
+if [ "$(id -u)" -ne 0 ]; then error "Debe ejecutar este script como root."; fi
 
-# --- Inicio del Script ---
-log_info "Iniciando el script de despliegue de agentes de seguridad..."
-
-# Verificar que el script se ejecuta como root
-if [ "$(id -u)" -ne 0 ]; then
-    log_error "Este script debe ser ejecutado como root o con sudo."
-fi
-
-# 1. Detección del Sistema Operativo
-OS_ID=""
+# --- Detectar sistema operativo ---
 if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS_ID=$ID
+  . /etc/os-release
+  OS=$ID
 else
-    log_error "No se pudo detectar el sistema operativo."
+  error "No se pudo detectar el sistema operativo."
+fi
+log "Sistema operativo detectado: $OS"
+
+# --- Detectar espacio disponible ---
+DISK_GB=$(df --total -BG --output=size | tail -1 | grep -o '[0-9]\+')
+log "Espacio total del servidor: ${DISK_GB} GB"
+
+# --- Detectar interfaz de red ---
+IFACE=$(ip -o -4 route show to default | awk '{print $5}')
+[ -z "$IFACE" ] && error "No se detectó interfaz de red principal."
+log "Interfaz de red principal: $IFACE"
+
+# --- Determinar modo de instalación ---
+if [ "$DISK_GB" -ge 500 ]; then
+    MODE="full"
+    log "Modo detectado: FULL (disco >= 500GB). Se instalará Wazuh + Suricata."
+else
+    MODE="light"
+    log "Modo detectado: LIGERO (disco < 500GB). Solo se instalará Wazuh Agent."
 fi
 
-log_info "Sistema operativo detectado: $OS_ID"
-
-# 2. Detección de la Interfaz de Red Principal
-INTERFACE=$(ip -o -4 route show to default | awk '{print $5}')
-if [ -z "$INTERFACE" ]; then
-    log_error "No se pudo detectar automáticamente la interfaz de red principal. Edita este script y define la variable INTERFACE manualmente."
+# --- Instalar dependencias básicas ---
+if [[ "$OS" =~ (ubuntu|debian) ]]; then
+    apt-get update -y && apt-get install -y curl gnupg software-properties-common
+else
+    dnf install -y curl gnupg2 || yum install -y curl gnupg2
 fi
-log_info "Interfaz de red principal detectada: $INTERFACE"
 
-# 3. Lógica de Instalación y Configuración
-if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
-    # --- Lógica para Ubuntu/Debian ---
-    log_info "Ejecutando la instalación para Ubuntu/Debian..."
-    
-    # Actualizar el sistema
-    apt-get update -y
-    
-    # Instalar Suricata
-    log_info "Instalando Suricata..."
-    apt-get install software-properties-common -y
-    add-apt-repository ppa:oisf/suricata-stable -y
-    apt-get update -y
-    apt-get install suricata -y
-    
-    # Configurar Suricata
-    log_info "Configurando Suricata para la interfaz $INTERFACE..."
-    sed -i "s/interface: eth0/interface: $INTERFACE/" /etc/suricata/suricata.yaml
-    
-    # Actualizar reglas de Suricata
-    log_info "Actualizando las reglas de Suricata..."
-    suricata-update
-    
-    # Iniciar y habilitar Suricata
-    systemctl start suricata
-    systemctl enable suricata
-    log_info "Suricata instalado y corriendo."
-    
-    # Instalar Agente de Wazuh
-    log_info "Instalando el Agente de Wazuh..."
-    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor | tee /usr/share/keyrings/wazuh-keyring.gpg > /dev/null
-    echo "deb [signed-by=/usr/share/keyrings/wazuh-keyring.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | tee -a /etc/apt/sources.list.d/wazuh.list
-    apt-get update -y
-    WAZUH_MANAGER=$WAZUH_MANAGER_ADDRESS apt-get install wazuh-agent -y
-    
-elif [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "cloudlinux" ]; then
-    # --- Lógica para AlmaLinux/RHEL/CentOS/CloudLinux ---
-    log_info "Ejecutando la instalación para un sistema basado en RHEL (AlmaLinux/CloudLinux)..."
-    
-    # Actualizar el sistema
-    dnf update -y
-    
-    # Instalar Suricata
-    log_info "Instalando Suricata..."
-    dnf install epel-release -y
-    dnf install suricata -y
-    
-    # Configurar Suricata
-    log_info "Configurando Suricata para la interfaz $INTERFACE..."
-    sed -i "s/interface: eth0/interface: $INTERFACE/" /etc/suricata/suricata.yaml
-    
-    # Actualizar reglas de Suricata
-    log_info "Actualizando las reglas de Suricata..."
-    suricata-update
-    
-    # Iniciar y habilitar Suricata
-    systemctl start suricata
-    systemctl enable suricata
-    log_info "Suricata instalado y corriendo."
-    
-    # Instalar Agente de Wazuh
-    log_info "Instalando el Agente de Wazuh..."
+# --- Instalar agente Wazuh ---
+log "Instalando agente Wazuh..."
+if [[ "$OS" =~ (ubuntu|debian) ]]; then
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+    apt-get update -y && WAZUH_MANAGER=$WAZUH_MANAGER apt-get install -y wazuh-agent
+else
     rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
-    tee /etc/yum.repos.d/wazuh.repo <<EOF
+    cat > /etc/yum.repos.d/wazuh.repo <<EOF
 [wazuh]
 gpgcheck=1
 gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
 enabled=1
 name=Wazuh repository
 baseurl=https://packages.wazuh.com/4.x/yum/
-protect=1
 EOF
-    WAZUH_MANAGER=$WAZUH_MANAGER_ADDRESS dnf install wazuh-agent -y
-
-else
-    log_error "Sistema operativo no soportado: $OS_ID. Este script solo soporta Ubuntu/Debian y sistemas basados en RHEL."
+    WAZUH_MANAGER=$WAZUH_MANAGER dnf install -y wazuh-agent
 fi
 
-# 4. Integración de Suricata con el Agente de Wazuh (Común para ambos sistemas)
-log_info "Integrando Suricata con el Agente de Wazuh..."
-cat >> /var/ossec/etc/ossec.conf << EOF
+# --- Configuración común de Wazuh Agent ---
+log "Configurando agente de Wazuh..."
+AGENT_CONF="/var/ossec/etc/ossec.conf"
+sed -i '/<localfile>/,/<\/localfile>/d' "$AGENT_CONF"
+cat >> "$AGENT_CONF" <<EOF
+<!-- Monitoreo básico del sistema -->
+<localfile>
+  <log_format>syslog</log_format>
+  <location>/var/log/syslog</location>
+</localfile>
+<localfile>
+  <log_format>syslog</log_format>
+  <location>/var/log/auth.log</location>
+</localfile>
+EOF
 
-<!-- Integración con Suricata -->
+# --- Si modo FULL, instalar Suricata ---
+if [ "$MODE" = "full" ]; then
+    log "Instalando Suricata (modo completo)..."
+    if [[ "$OS" =~ (ubuntu|debian) ]]; then
+        add-apt-repository ppa:oisf/suricata-stable -y
+        apt-get update -y && apt-get install -y suricata
+    else
+        dnf install -y epel-release suricata
+    fi
+
+    log "Configurando Suricata..."
+    sed -i "s/interface: .*/interface: $IFACE/" /etc/suricata/suricata.yaml
+    sed -i 's/#* *types:.*/types:\n      - alert/' /etc/suricata/suricata.yaml
+
+    # Rotación de logs para evitar saturación
+    cat > /etc/logrotate.d/suricata <<EOF
+/var/log/suricata/*.log /var/log/suricata/*.json {
+    daily
+    rotate 5
+    compress
+    missingok
+    notifempty
+}
+EOF
+
+    systemctl enable --now suricata
+    usermod -a -G suricata wazuh
+    cat >> "$AGENT_CONF" <<EOF
+<!-- Integración Suricata -->
 <localfile>
   <log_format>json</log_format>
   <location>/var/log/suricata/eve.json</location>
 </localfile>
 EOF
+    log "Suricata instalado e integrado correctamente."
+else
+    log "Modo liviano: Suricata no será instalado en este servidor."
+fi
 
-# 5. Corrección de Permisos
-log_info "Ajustando permisos para que el agente de Wazuh pueda leer los logs de Suricata..."
-usermod -a -G suricata wazuh
-
-# 6. Iniciar y Habilitar el Agente de Wazuh
-log_info "Iniciando y habilitando el Agente de Wazuh..."
+# --- Iniciar agente Wazuh ---
 systemctl daemon-reload
 systemctl enable wazuh-agent
-systemctl start wazuh-agent
+systemctl restart wazuh-agent
 
-log_info "--- ¡Despliegue completado con éxito! ---"
-log_info "El agente debería aparecer en tu dashboard de Wazuh en unos minutos."
-
+# --- Estado final ---
+log "✅ Instalación completada."
+log "El agente se conectará automáticamente a: $WAZUH_MANAGER"
+if [ "$MODE" = "full" ]; then
+    log "Suricata también está corriendo en la interfaz $IFACE con rotación de logs diaria."
+else
+    log "Solo se instaló el agente Wazuh (modo liviano)."
+fi
