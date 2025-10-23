@@ -1,68 +1,72 @@
 #!/bin/bash
 # ==============================================================================
-# SISBolivia - Onboarding de Agente de Seguridad (v2.5)
-# ------------------------------------------------------------------------------
+# Wazuh Agent + Suricata Deployment Script (v2.6)
+# Autor: Hans Gallardo (mejorado con ChatGPT)
+# Compatible con: Ubuntu/Debian y RHEL/AlmaLinux
+# ==============================================================================
 
-WAZUH_MANAGER_ADDRESS="wazuh.sisbolivia.com"
+WAZUH_MANAGER="wazuh.sisbolivia.com"
 
-# --- Utilidades ---
-log() { echo -e "\033[1;32m[INFO]\033[0m $1"; }
-warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
-error() { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
+# --- funciones auxiliares ---
+log() { echo -e "\033[1;34m[INFO]\033[0m $1"; }
+err() { echo -e "\033[1;31m[ERROR]\033[0m $1"; exit 1; }
 
-# --- Verificar root ---
-[ "$(id -u)" -ne 0 ] && error "Debe ejecutar este script como root."
+# --- detección de root ---
+[ "$(id -u)" -ne 0 ] && err "Ejecuta este script como root o con sudo."
 
-# --- Detectar OS ---
+# --- detectar SO ---
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS=$ID
 else
-  error "No se pudo detectar el sistema operativo."
+  err "No se pudo detectar el sistema operativo."
 fi
 log "Sistema operativo detectado: $OS"
 
-# --- Verificar conectividad con el Manager ---
-if ping -c 1 -W 3 "$WAZUH_MANAGER_ADDRESS" >/dev/null 2>&1; then
-  log "Conectividad con el Manager OK ($WAZUH_MANAGER_ADDRESS)"
-else
-  warn "No se pudo contactar con $WAZUH_MANAGER_ADDRESS. Verifique red o DNS."
+# --- flags ---
+INSTALL_SURICATA=false
+for arg in "$@"; do
+  case $arg in
+    --with-suricata) INSTALL_SURICATA=true ;;
+  esac
+done
+
+# --- modo interactivo si no se pasó flag ---
+if [ "$INSTALL_SURICATA" = false ]; then
+  read -p "¿Deseas instalar también Suricata? (s/n): " opt
+  [[ "$opt" =~ ^[Ss]$ ]] && INSTALL_SURICATA=true
 fi
 
-# --- Detectar interfaz principal ---
-IFACE=$(ip -o -4 route show to default | awk '{print $5}')
-[ -z "$IFACE" ] && error "No se detectó interfaz de red principal."
-log "Interfaz de red principal: $IFACE"
-
-# --- Limpieza previa opcional ---
-if systemctl list-unit-files | grep -q wazuh-agent.service; then
-  warn "Se detecta instalación previa de Wazuh."
-  read -p "¿Desea reinstalar desde cero? (y/N): " ans
-  if [[ "$ans" =~ ^[Yy]$ ]]; then
-    systemctl stop wazuh-agent 2>/dev/null
-    apt purge wazuh-agent -y 2>/dev/null || dnf remove wazuh-agent -y 2>/dev/null
-    rm -rf /var/ossec
-    log "Instalación previa eliminada."
-  fi
+# --- limpiar instalaciones previas ---
+if systemctl list-units --type=service | grep -q wazuh-agent; then
+  log "Eliminando instalación previa de Wazuh..."
+  systemctl stop wazuh-agent 2>/dev/null
+  apt-get remove --purge wazuh-agent -y 2>/dev/null || dnf remove -y wazuh-agent 2>/dev/null
+  rm -rf /var/ossec /etc/ossec* /etc/systemd/system/wazuh-agent.service
 fi
 
-# --- Dependencias ---
+# --- instalación según SO ---
 if [[ "$OS" =~ (ubuntu|debian) ]]; then
+  log "Actualizando paquetes..."
   apt-get update -y --allow-releaseinfo-change
-  apt-get install -y curl gnupg apt-transport-https software-properties-common
-else
-  dnf -y update --setopt=exclude=wp-toolkit* --setopt=skip_if_unavailable=True
-  dnf install -y curl gnupg2 || yum install -y curl gnupg2
-fi
 
-# --- Instalar Wazuh Agent ---
-log "Instalando agente Wazuh..."
-if [[ "$OS" =~ (ubuntu|debian) ]]; then
+  log "Instalando dependencias base..."
+  apt-get install -y curl gnupg logrotate jq software-properties-common
+
+  log "Agregando repositorio de Wazuh..."
   curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
-  echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+  echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
+    > /etc/apt/sources.list.d/wazuh.list
+
   apt-get update -y
-  apt-get install -y wazuh-agent
-else
+  log "Instalando Wazuh Agent..."
+  WAZUH_MANAGER=$WAZUH_MANAGER apt-get install -y wazuh-agent
+
+elif [[ "$OS" =~ (rhel|centos|almalinux|rocky|cloudlinux) ]]; then
+  log "Instalando dependencias base..."
+  dnf install -y curl gnupg2 logrotate jq
+
+  log "Agregando repositorio de Wazuh..."
   rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
   cat > /etc/yum.repos.d/wazuh.repo <<EOF
 [wazuh]
@@ -71,47 +75,83 @@ gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
 enabled=1
 name=Wazuh repository
 baseurl=https://packages.wazuh.com/4.x/yum/
-EOF
-  dnf install -y wazuh-agent --setopt=exclude=wp-toolkit*
-fi
-
-# --- Corregir Manager IP en configuración ---
-CONF="/var/ossec/etc/ossec.conf"
-if [ -f "$CONF" ]; then
-  sed -i '/<client>/,/<\/client>/d' "$CONF"
-fi
-
-cat >> "$CONF" <<EOF
-<client>
-  <server>
-    <address>$WAZUH_MANAGER_ADDRESS</address>
-    <port>1514</port>
-    <protocol>tcp</protocol>
-  </server>
-</client>
+protect=1
 EOF
 
-# --- Permisos ---
-chown -R wazuh:wazuh /var/ossec
-chmod -R 750 /var/ossec
+  log "Instalando Wazuh Agent..."
+  WAZUH_MANAGER=$WAZUH_MANAGER dnf install -y wazuh-agent
+else
+  err "Sistema no soportado: $OS"
+fi
 
-# --- Activar y probar servicio ---
-log "Iniciando Wazuh Agent..."
-systemctl daemon-reexec
+# --- suricata opcional ---
+if [ "$INSTALL_SURICATA" = true ]; then
+  log "Instalando Suricata..."
+
+  if [[ "$OS" =~ (ubuntu|debian) ]]; then
+    add-apt-repository ppa:oisf/suricata-stable -y
+    apt-get update -y
+    apt-get install -y suricata
+  else
+    dnf install -y epel-release
+    dnf install -y suricata
+  fi
+
+  IFACE=$(ip -o -4 route show to default | awk '{print $5}')
+  [ -z "$IFACE" ] && err "No se pudo detectar interfaz de red principal."
+
+  log "Configurando Suricata en interfaz $IFACE (alert-only)..."
+  sed -i "s/interface: .*/interface: $IFACE/" /etc/suricata/suricata.yaml
+  sed -i '/types:/,/^ *- / s/^ *- .*/  - alert/' /etc/suricata/suricata.yaml
+
+  suricata-update
+  systemctl enable --now suricata
+
+  # rotación de logs
+  log "Configurando rotación de logs de Suricata..."
+  cat > /etc/logrotate.d/suricata <<EOF
+/var/log/suricata/*.log /var/log/suricata/*.json {
+    hourly
+    rotate 24
+    size 50M
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+
+  # integrar con wazuh
+  log "Integrando Suricata con Wazuh Agent..."
+  grep -q "suricata/eve.json" /var/ossec/etc/ossec.conf || cat >> /var/ossec/etc/ossec.conf <<EOF
+
+<!-- Integración Suricata -->
+<localfile>
+  <log_format>json</log_format>
+  <location>/var/log/suricata/eve.json</location>
+</localfile>
+EOF
+  usermod -a -G suricata wazuh 2>/dev/null
+fi
+
+# --- iniciar wazuh ---
+log "Habilitando y arrancando Wazuh Agent..."
 systemctl daemon-reload
 systemctl enable wazuh-agent
-systemctl restart wazuh-agent
-sleep 3
+systemctl start wazuh-agent || err "Error al iniciar Wazuh Agent."
 
-if systemctl is-active --quiet wazuh-agent; then
-  log "✅ Wazuh Agent iniciado correctamente."
+# --- verificación de conexión ---
+log "Verificando conexión con el Manager..."
+sleep 5
+if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$WAZUH_MANAGER/1514" 2>/dev/null; then
+  log "✅ Conexión TCP con $WAZUH_MANAGER OK"
 else
-  warn "El agente no inició correctamente. Intentando reparación..."
-  sed -i "s/MANAGER_IP/$WAZUH_MANAGER_ADDRESS/" "$CONF"
-  systemctl restart wazuh-agent
+  err "❌ No se pudo conectar al Manager $WAZUH_MANAGER en el puerto 1514."
 fi
 
-log "Estado actual del agente:"
-systemctl status wazuh-agent --no-pager
+log "Verificando estado del agente..."
+sleep 2
+systemctl status wazuh-agent --no-pager | grep -E "Active|running" || true
 
-log "Si todo es correcto, el agente aparecerá en el Dashboard de Wazuh en unos minutos."
+log "✅ Instalación completada exitosamente."
+log "Revisa en tu Dashboard de Wazuh que el agente aparezca en línea."
